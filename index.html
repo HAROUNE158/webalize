@@ -789,6 +789,9 @@
   .acc-id{display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; margin-top:22px; padding-top:18px; border-top:1px solid var(--line); color:var(--ink-dim); font-size:13.5px;}
   .acc-id b{color:var(--ink); font-family:var(--font-head); font-size:16px; letter-spacing:1.5px;}
   .tx-search{display:flex; align-items:center; gap:12px; margin-bottom:14px;}
+  .ctx-menu{position:fixed; z-index:9999; background:var(--bg-raised); border:1px solid var(--line); border-radius:10px; padding:6px; box-shadow:0 18px 40px -14px rgba(0,0,0,.6); min-width:150px;}
+  .ctx-menu button{display:block; width:100%; text-align:start; background:none; border:none; color:var(--danger); font-family:var(--font-body); font-size:13.5px; padding:9px 12px; border-radius:8px; cursor:pointer;}
+  .ctx-menu button:hover{background:rgba(255,107,107,.12);}
   .tx-search input{flex:1;}
   .tx-count{color:var(--ink-dim); font-size:12.5px; white-space:nowrap;}
   .tx-user{display:flex; align-items:center; gap:12px; min-width:0;}
@@ -1660,7 +1663,7 @@ const STATUSES = {
 const TRACK = ['الاستلام','المراجعة','البناء','المعاينة','التسليم'];
 const ORDER_PREFIX = '[[ORDER]]';
 const STATUS_PREFIX = '[[STATUS]]';
-const REVIEW_PREFIX = '[[REVIEW]]';
+const REVIEW_PREFIX = '[[REVIEW]]'; const DELETE_PREFIX = '[[DELETE]]';
 let reviewResponses = {}; // rid -> {rating, text, created_at}
 
 /* ---------- state ---------- */
@@ -2020,7 +2023,45 @@ async function fetchOrders(email){
   return [...map.values()].sort((x, y)=> new Date(y.created_at) - new Date(x.created_at));
 }
 
-async function sendTo(threadEmail, type, content){
+async function fetchOrders(email){
+  const cols = 'id,thread_email,sender_email,content,created_at';
+  let q1 = sb.from('messages').select(cols).like('content', ORDER_PREFIX + '%').order('created_at', {ascending:true});
+  let q2 = sb.from('messages').select(cols).like('content', STATUS_PREFIX + '%').order('created_at', {ascending:true});
+  let q3 = sb.from('messages').select(cols).like('content', DELETE_PREFIX + '%').order('created_at', {ascending:true});
+  if(email){ q1 = q1.eq('thread_email', email); q2 = q2.eq('thread_email', email); q3 = q3.eq('thread_email', email); }
+  const [a, b, c] = await Promise.all([q1, q2, q3]);
+  if(a.error){ console.error('fetchOrders error:', a.error); return null; }
+  const map = new Map();
+  (a.data || []).forEach(m=>{
+    const d = parseTagged(m.content, ORDER_PREFIX);
+    if(!d || !d.oid || String(m.sender_email||"").toLowerCase() !== String(m.thread_email||"").toLowerCase()) return;
+    map.set(d.oid + '|' + m.thread_email, {
+      oid: d.oid, email: m.thread_email, created_at: m.created_at, data: d,
+      status: 'new', deleted: false, history: [{status:'new', at:m.created_at, by:'user'}]
+    });
+  });
+  ((b && b.data) || []).forEach(m=>{
+    const s = parseTagged(m.content, STATUS_PREFIX);
+    if(!s || !STATUSES[s.status]) return;
+    const o = map.get(s.oid + '|' + m.thread_email);
+    if(!o) return;
+    const byOwner = String(m.sender_email||"").toLowerCase() === String(m.thread_email||"").toLowerCase();
+    const byAdmin = !byOwner;
+    if(byAdmin){ /* الأدمن يغيّر أي حالة */ }
+    else if(byOwner && s.status === 'cancelled' && ['new','review'].includes(o.status)){ /* العميل يلغي قبل البناء فقط */ }
+    else return;
+    o.status = s.status;
+    o.history.push({status:s.status, at:m.created_at, by: byAdmin ? 'admin' : 'user'});
+  });
+  ((c && c.data) || []).forEach(m=>{
+    const dmark = parseTagged(m.content, DELETE_PREFIX);
+    if(!dmark || typeof dmark.deleted !== 'boolean') return;
+    const o = map.get(dmark.oid + '|' + m.thread_email);
+    if(!o) return;
+    o.deleted = dmark.deleted;
+  });
+  return [...map.values()].sort((x, y)=> new Date(y.created_at) - new Date(x.created_at));
+}threadEmail, type, content){
   const { error } = await sb.from('messages').insert({ thread_email: threadEmail, sender_email: currentUser.email, is_admin: isAdmin(), type, content });
   if(error){ console.error('sendTo error:', error); toast('تعذّر الإرسال: ' + error.message, 'err'); return false; }
   return true;
@@ -3863,6 +3904,7 @@ buildLanding();
   const { data } = await sb.auth.getSession();
   if(data.session){
     enterDashboard(data.session.user);
+    
   }
 })();
 </script>
